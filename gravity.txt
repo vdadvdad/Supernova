@@ -1,0 +1,5 @@
+Gravity chess is a chess variant. In this variant, white pieces fall towards 8th rank and black pieces fall towards 1st rank.
+Pieces stop falling when they encounter another piece on their way that cannot fall. Pieces of different colors do not fall through each other. Pawns do not fall at all
+Castling is not possible if at one of the squares of the way king would get affected by gravity and fall, much like how it is not possible to castle through check in normal chess.
+En-passant is possible, and in case of en-passant pawn can take either only the piece behind the pawn, or both the piece and a pawn.
+Objective of the game is to capture the king. 
