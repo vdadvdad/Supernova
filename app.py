@@ -36,6 +36,8 @@ class GravityChessApp:
         self.engine_queue: mp.Queue = mp.Queue()
         self.engine_process: mp.Process | None = None
         self.engine_generation = 0
+        self.side_var = tk.StringVar(value="White")
+        self.move_history: list[str] = []
 
         self.canvas = tk.Canvas(
             root,
@@ -49,8 +51,25 @@ class GravityChessApp:
         self.status = tk.Label(root, text="Your move", anchor="w")
         self.status.grid(row=1, column=0, sticky="we")
 
+        self.side_menu = tk.OptionMenu(
+            root, self.side_var, "White", "Black", command=self.on_side_change
+        )
+        self.side_menu.grid(row=1, column=1, sticky="e")
+
         self.reset_button = tk.Button(root, text="New Game", command=self.reset)
-        self.reset_button.grid(row=1, column=1, sticky="e")
+        self.reset_button.grid(row=2, column=1, sticky="e")
+
+        self.moves_frame = tk.Frame(root)
+        self.moves_frame.grid(row=0, column=2, rowspan=3, sticky="ns")
+        self.moves_label = tk.Label(self.moves_frame, text="Moves")
+        self.moves_label.pack(anchor="w")
+        self.moves_text = tk.Text(
+            self.moves_frame, width=28, height=24, state="disabled", wrap="word"
+        )
+        self.moves_text.pack(side="left", fill="y")
+        self.moves_scroll = tk.Scrollbar(self.moves_frame, command=self.moves_text.yview)
+        self.moves_scroll.pack(side="right", fill="y")
+        self.moves_text.configure(yscrollcommand=self.moves_scroll.set)
 
         self.images = self._load_images()
         self.draw_board()
@@ -92,8 +111,16 @@ class GravityChessApp:
             self._stop_engine_process()
         self.state = GameState.starting()
         self.selected = None
+        self.user_color = WHITE if self.side_var.get() == "White" else BLACK
         self.status.config(text="Your move")
+        self.move_history = []
+        self._refresh_moves_display()
         self.draw_board()
+        if self.user_color == BLACK:
+            self.start_engine_move()
+
+    def on_side_change(self, _value: str) -> None:
+        self.reset()
 
     def draw_board(self) -> None:
         self.canvas.delete("all")
@@ -104,7 +131,7 @@ class GravityChessApp:
                 x2 = x1 + SQUARE_SIZE
                 y2 = y1 + SQUARE_SIZE
                 is_light = (r + c) % 2 == 0
-                color = "#f0d9b5" if is_light else "#b58863"
+                color = "#b58863" if is_light else "#f0d9b5"
                 self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline=color)
                 if self.selected == (r, c):
                     self.canvas.create_rectangle(
@@ -148,6 +175,7 @@ class GravityChessApp:
             self.selected = None
             self.draw_board()
             return
+        self._record_move(self.state, legal)
         self.selected = None
         self.state = self.state.apply_move(legal)
         self.draw_board()
@@ -217,6 +245,7 @@ class GravityChessApp:
             self.status.config(text="Engine has no moves.")
             messagebox.showinfo("Game Over", "Engine has no moves.")
             return
+        self._record_move(self.state, move)
         self.state = self.state.apply_move(move)
         self.draw_board()
         winner = self.state.is_terminal()
@@ -228,6 +257,45 @@ class GravityChessApp:
             text=f"Your move | Eval: {score:.3f} | Nodes: {nodes} | {elapsed:.2f}s"
         )
 
+    def _record_move(self, state: GameState, move: Move) -> None:
+        san = self._move_to_san(state, move)
+        self.move_history.append(san)
+        self._refresh_moves_display()
+
+    def _refresh_moves_display(self) -> None:
+        lines: list[str] = []
+        for index in range(0, len(self.move_history), 2):
+            move_num = index // 2 + 1
+            white_move = self.move_history[index]
+            black_move = self.move_history[index + 1] if index + 1 < len(self.move_history) else ""
+            if black_move:
+                lines.append(f"{move_num}. {white_move} {black_move}")
+            else:
+                lines.append(f"{move_num}. {white_move}")
+        self.moves_text.configure(state="normal")
+        self.moves_text.delete("1.0", tk.END)
+        self.moves_text.insert(tk.END, "\n".join(lines))
+        self.moves_text.configure(state="disabled")
+        self.moves_text.see(tk.END)
+
+    def _move_to_san(self, state: GameState, move: Move) -> str:
+        sr, sc = move.start
+        er, ec = move.end
+        piece = state.piece_at(sr, sc)
+        captured = state.piece_at(er, ec) is not None
+        if piece is None:
+            return str(move)
+        piece_letter = "" if piece.upper() == "P" else piece.upper()
+        target = self._square_to_alg(er, ec)
+        if piece.upper() == "P" and captured:
+            piece_letter = chr(ord("a") + sc)
+        capture_mark = "x" if captured else ""
+        promo = f"={move.promotion}" if move.promotion else ""
+        return f"{piece_letter}{capture_mark}{target}{promo}"
+
+    def _square_to_alg(self, r: int, c: int) -> str:
+        return f"{chr(ord('a') + c)}{r + 1}"
+
 
 def _engine_worker(
     state: GameState,
@@ -236,7 +304,7 @@ def _engine_worker(
     result_queue: mp.Queue,
 ) -> None:
     start_time = time.perf_counter()
-    move, score, nodes = iterative_deepening_best_move_with_score(
+    move, score, nodes, _, _ = iterative_deepening_best_move_with_score(
         state, max_depth=depth
     )
     elapsed = time.perf_counter() - start_time

@@ -116,6 +116,73 @@ class GameState:
             return WHITE
         return None
 
+    def is_in_check(self, side: str) -> bool:
+        king = "K" if side == WHITE else "k"
+        king_pos = None
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                if self.board[r][c] == king:
+                    king_pos = (r, c)
+                    break
+            if king_pos:
+                break
+        if king_pos is None:
+            return True
+        kr, kc = king_pos
+        opponent = BLACK if side == WHITE else WHITE
+
+        pawn_dir = 1 if opponent == WHITE else -1
+        for dc in (-1, 1):
+            pr, pc = kr - pawn_dir, kc - dc
+            if self.in_bounds(pr, pc):
+                piece = self.piece_at(pr, pc)
+                if piece and self.side_of(piece) == opponent and piece.upper() == "P":
+                    return True
+
+        for dr, dc in [
+            (2, 1), (2, -1), (-2, 1), (-2, -1),
+            (1, 2), (1, -2), (-1, 2), (-1, -2),
+        ]:
+            nr, nc = kr + dr, kc + dc
+            if not self.in_bounds(nr, nc):
+                continue
+            piece = self.piece_at(nr, nc)
+            if piece and self.side_of(piece) == opponent and piece.upper() == "N":
+                return True
+
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = kr + dr, kc + dc
+                if not self.in_bounds(nr, nc):
+                    continue
+                piece = self.piece_at(nr, nc)
+                if piece and self.side_of(piece) == opponent and piece.upper() == "K":
+                    return True
+
+        for dr, dc, targets in [
+            (1, 1, {"B", "Q"}),
+            (1, -1, {"B", "Q"}),
+            (-1, 1, {"B", "Q"}),
+            (-1, -1, {"B", "Q"}),
+            (1, 0, {"R", "Q"}),
+            (-1, 0, {"R", "Q"}),
+            (0, 1, {"R", "Q"}),
+            (0, -1, {"R", "Q"}),
+        ]:
+            nr, nc = kr + dr, kc + dc
+            while self.in_bounds(nr, nc):
+                piece = self.piece_at(nr, nc)
+                if piece:
+                    if self.side_of(piece) == opponent and piece.upper() in targets:
+                        return True
+                    break
+                nr += dr
+                nc += dc
+
+        return False
+
     def generate_moves(self) -> List[Move]:
         moves: List[Move] = []
         for r in range(BOARD_SIZE):
@@ -403,7 +470,7 @@ def minimax_best_move_with_score(
     killer_moves: Optional[Dict[int, List[Move]]] = None,
     history: Optional[Dict[Move, int]] = None,
     pv_move: Optional[Move] = None,
-) -> Tuple[Optional[Move], float, int]:
+) -> Tuple[Optional[Move], float, int, List[Tuple[Move, float]]]:
     root_player = state.side_to_move
     q_tt: Dict[int, float] = {}
     counter = NodeCounter()
@@ -416,8 +483,9 @@ def minimax_best_move_with_score(
         depth,
     )
     if not moves:
-        return None, 0.0, 0
+        return None, 0.0, 0, []
     best_move = None
+    scored_moves: List[Tuple[Move, float]] = []
     if state.side_to_move == root_player:
         best_score = float("-inf")
         for move in moves:
@@ -435,10 +503,11 @@ def minimax_best_move_with_score(
                 counter,
             )
             state.undo_move(undo)
+            scored_moves.append((move, float(score)))
             if score > best_score:
                 best_score = score
                 best_move = move
-        return best_move, float(best_score), counter.count
+        return best_move, float(best_score), counter.count, scored_moves
     else:
         best_score = float("inf")
         q = Queue()
@@ -466,9 +535,10 @@ def minimax_best_move_with_score(
             scores.append(q.get())
         values = [score for score, _ in scores]
         nodes = sum(node_count for _, node_count in scores)
+        scored_moves = list(zip(moves, values))
         best_score = min(values)
         best_move = moves[values.index(best_score)]
-    return best_move, float(best_score), nodes
+    return best_move, float(best_score), nodes, scored_moves
 
 
 def minimax(
@@ -533,8 +603,14 @@ def minimax(
     maximizing = state.side_to_move == root_player
     if maximizing:
         value = float("-inf")
+        any_legal = False
         for move in moves:
             undo = state.make_move(move)
+            moving_side = WHITE if state.side_to_move == BLACK else BLACK
+            if not _is_king_piece(undo.captured_piece) and state.is_in_check(moving_side):
+                state.undo_move(undo)
+                continue
+            any_legal = True
             value = max(
                 value,
                 minimax(
@@ -554,6 +630,11 @@ def minimax(
             if alpha >= beta:
                 _record_killer_and_history(state, move, depth, killer_moves, history)
                 break
+        if not any_legal:
+            if state.is_in_check(state.side_to_move):
+                value = -100 + depth if state.side_to_move == root_player else 100 - depth
+            else:
+                value = 0.0
         if tt is not None:
             if value <= alpha_orig:
                 flag = TT_UPPER
@@ -566,8 +647,14 @@ def minimax(
             q.put(value)
         return value
     value = float("inf")
+    any_legal = False
     for move in moves:
         undo = state.make_move(move)
+        moving_side = WHITE if state.side_to_move == BLACK else BLACK
+        if not _is_king_piece(undo.captured_piece) and state.is_in_check(moving_side):
+            state.undo_move(undo)
+            continue
+        any_legal = True
         value = min(
             value,
             minimax(
@@ -587,6 +674,11 @@ def minimax(
         if alpha >= beta:
             _record_killer_and_history(state, move, depth, killer_moves, history)
             break
+    if not any_legal:
+        if state.is_in_check(state.side_to_move):
+            value = -100 + depth if state.side_to_move == root_player else 100 - depth
+        else:
+            value = 0.0
     if tt is not None:
         if value <= alpha_orig:
             flag = TT_UPPER
@@ -607,7 +699,7 @@ def quiescence(
     beta: float,
     q_tt: Optional[Dict[int, float]] = None,
     q_depth: int = 0,
-    max_q_depth: int = 6,
+    max_q_depth: int = 10,
     counter: Optional[NodeCounter] = None,
 ) -> float:
     if counter is not None:
@@ -619,10 +711,14 @@ def quiescence(
             return cached
     winner = state.is_terminal()
     if winner:
-        return 100 if winner == root_player else -100
+        return 100 - q_depth if winner == root_player else -100 + q_depth
     stand_pat = float(evaluate_material(state, root_player))
     if q_depth >= max_q_depth:
-        return stand_pat
+        moves = [move for move in state.generate_moves() if _is_capture(state, move)]
+        if not any(
+            state.piece_at(move.end[0], move.end[1]) in ("K", "k") for move in moves
+        ):
+            return stand_pat
     max_gain = PIECE_VALUES["Q"]
     if stand_pat + max_gain < alpha:
         return stand_pat
@@ -645,6 +741,10 @@ def quiescence(
         value = stand_pat
         for move in moves:
             undo = state.make_move(move)
+            moving_side = WHITE if state.side_to_move == BLACK else BLACK
+            if not _is_king_piece(undo.captured_piece) and state.is_in_check(moving_side):
+                state.undo_move(undo)
+                continue
             value = max(
                 value,
                 quiescence(
@@ -671,6 +771,10 @@ def quiescence(
     value = stand_pat
     for move in moves:
         undo = state.make_move(move)
+        moving_side = WHITE if state.side_to_move == BLACK else BLACK
+        if not _is_king_piece(undo.captured_piece) and state.is_in_check(moving_side):
+            state.undo_move(undo)
+            continue
         value = min(
             value,
             quiescence(
@@ -725,15 +829,22 @@ def _minimax_process(
 
 def iterative_deepening_best_move_with_score(
     state: GameState, max_depth: int
-) -> Tuple[Optional[Move], float, int]:
+) -> Tuple[
+    Optional[Move],
+    float,
+    int,
+    List[Tuple[Move, float]],
+    Dict[int, Tuple[int, float, str]],
+]:
     best_move: Optional[Move] = None
     best_score: float = 0.0
     best_nodes: int = 0
+    best_scored_moves: List[Tuple[Move, float]] = []
     tt: Dict[int, Tuple[int, float, str]] = {}
     killer_moves: Dict[int, List[Move]] = {}
     history: Dict[Move, int] = {}
     for depth in range(1, max_depth + 1):
-        move, score, nodes = minimax_best_move_with_score(
+        move, score, nodes, scored_moves = minimax_best_move_with_score(
             state,
             depth,
             tt,
@@ -745,7 +856,8 @@ def iterative_deepening_best_move_with_score(
             best_move = move
             best_score = score
             best_nodes = nodes
-    return best_move, best_score, best_nodes
+            best_scored_moves = scored_moves
+    return best_move, best_score, best_nodes, best_scored_moves, tt
 
 
 def _order_moves(
@@ -810,6 +922,10 @@ def _is_winning_capture(state: GameState, move: Move) -> bool:
     if victim.upper() == "K":
         return True
     return PIECE_VALUES[victim.upper()] >= PIECE_VALUES[attacker.upper()]
+
+
+def _is_king_piece(piece: Optional[str]) -> bool:
+    return piece is not None and piece.upper() == "K"
 
 
 def _record_killer_and_history(
@@ -884,17 +1000,44 @@ def main() -> None:
         print("Engine analyzing position...")
     while True:
         start_time = time.perf_counter()
-        move, score, nodes = iterative_deepening_best_move_with_score(
+        move, score, nodes, scored_moves, tt = iterative_deepening_best_move_with_score(
             state, max_depth=args.depth
         )
         elapsed = time.perf_counter() - start_time
         if move:
+            engine_side = state.side_to_move
             print(str(move))
             state = state.apply_move(move)
             print(state)
             print(
                 f"Evaluation: {score:.3f} (nodes: {nodes}, time: {elapsed:.3f}s)"
             )
+            reply_moves = state.generate_moves()
+            if reply_moves:
+                reply_depth = max(0, args.depth - 2)
+                reply_killers: Dict[int, List[Move]] = {}
+                reply_history: Dict[Move, int] = {}
+                reply_q_tt: Dict[int, float] = {}
+                reply_scored: List[Tuple[Move, float]] = []
+                for reply in reply_moves:
+                    undo = state.make_move(reply)
+                    value = minimax(
+                        state,
+                        reply_depth,
+                        engine_side,
+                        float("-inf"),
+                        float("inf"),
+                        tt,
+                        reply_killers,
+                        reply_history,
+                        reply_q_tt,
+                    )
+                    state.undo_move(undo)
+                    reply_scored.append((reply, float(value)))
+                reply_scored.sort(key=lambda item: item[1])
+                print("Response evaluations:")
+                for candidate, value in reply_scored:
+                    print(f"  {candidate}: {value:.3f}")
         else:
             print("0000")
             return
