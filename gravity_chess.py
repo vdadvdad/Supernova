@@ -321,6 +321,18 @@ class GameState:
         self._hash = undo.hash_before
         self._material_diff = undo.material_before
 
+    def make_null_move(self) -> Tuple[str, int]:
+        side_before = self.side_to_move
+        hash_before = self._hash
+        self.side_to_move = WHITE if self.side_to_move == BLACK else BLACK
+        self._hash ^= _ZOBRIST_SIDE
+        return side_before, hash_before
+
+    def undo_null_move(self, undo: Tuple[str, int]) -> None:
+        side_before, hash_before = undo
+        self.side_to_move = side_before
+        self._hash = hash_before
+
     def _apply_gravity(self) -> None:
         changed = True
         while changed:
@@ -554,6 +566,9 @@ def minimax(
     counter: Optional[NodeCounter] = None,
     q: Optional[Queue] = None,
 ) -> float:
+    NULL_MOVE_REDUCTION = 2
+    LMR_REDUCTION = 1
+    LMR_MOVE_COUNT = 3
     if counter is not None:
         counter.count += 1
     if tt is not None:
@@ -601,19 +616,60 @@ def minimax(
         return value
 
     maximizing = state.side_to_move == root_player
+    if depth >= 3 and not state.is_in_check(state.side_to_move):
+        null_undo = state.make_null_move()
+        null_value = minimax(
+            state,
+            depth - 1 - NULL_MOVE_REDUCTION,
+            root_player,
+            alpha,
+            beta,
+            tt,
+            killer_moves,
+            history,
+            q_tt,
+            counter,
+        )
+        state.undo_null_move(null_undo)
+        if maximizing and null_value >= beta:
+            if q:
+                q.put(null_value)
+            return null_value
+        if not maximizing and null_value <= alpha:
+            if q:
+                q.put(null_value)
+            return null_value
     if maximizing:
         value = float("-inf")
         any_legal = False
-        for move in moves:
+        for index, move in enumerate(moves):
             undo = state.make_move(move)
             moving_side = WHITE if state.side_to_move == BLACK else BLACK
             if not _is_king_piece(undo.captured_piece) and state.is_in_check(moving_side):
                 state.undo_move(undo)
                 continue
             any_legal = True
-            value = max(
-                value,
-                minimax(
+            reduced_depth = depth - 1
+            if (
+                depth >= 3
+                and index >= LMR_MOVE_COUNT
+                and not _is_capture(state, move)
+            ):
+                reduced_depth = depth - 1 - LMR_REDUCTION
+            candidate = minimax(
+                state,
+                reduced_depth,
+                root_player,
+                alpha,
+                beta,
+                tt,
+                killer_moves,
+                history,
+                q_tt,
+                counter,
+            )
+            if reduced_depth != depth - 1 and candidate > alpha:
+                candidate = minimax(
                     state,
                     depth - 1,
                     root_player,
@@ -623,8 +679,9 @@ def minimax(
                     killer_moves,
                     history,
                     q_tt,
-                ),
-            )
+                    counter,
+                )
+            value = max(value, candidate)
             state.undo_move(undo)
             alpha = max(alpha, value)
             if alpha >= beta:
@@ -648,16 +705,30 @@ def minimax(
         return value
     value = float("inf")
     any_legal = False
-    for move in moves:
+    for index, move in enumerate(moves):
         undo = state.make_move(move)
         moving_side = WHITE if state.side_to_move == BLACK else BLACK
         if not _is_king_piece(undo.captured_piece) and state.is_in_check(moving_side):
             state.undo_move(undo)
             continue
         any_legal = True
-        value = min(
-            value,
-            minimax(
+        reduced_depth = depth - 1
+        if depth >= 3 and index >= LMR_MOVE_COUNT and not _is_capture(state, move):
+            reduced_depth = depth - 1 - LMR_REDUCTION
+        candidate = minimax(
+            state,
+            reduced_depth,
+            root_player,
+            alpha,
+            beta,
+            tt,
+            killer_moves,
+            history,
+            q_tt,
+            counter,
+        )
+        if reduced_depth != depth - 1 and candidate < beta:
+            candidate = minimax(
                 state,
                 depth - 1,
                 root_player,
@@ -667,8 +738,9 @@ def minimax(
                 killer_moves,
                 history,
                 q_tt,
-            ),
-        )
+                counter,
+            )
+        value = min(value, candidate)
         state.undo_move(undo)
         beta = min(beta, value)
         if alpha >= beta:
@@ -975,6 +1047,11 @@ def main() -> None:
         help="Minimax depth limit (plies) for engine calculation",
     )
     parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print debug information",
+    )
+    parser.add_argument(
         "--fen",
         type=str,
         default=None,
@@ -1035,9 +1112,10 @@ def main() -> None:
                     state.undo_move(undo)
                     reply_scored.append((reply, float(value)))
                 reply_scored.sort(key=lambda item: item[1])
-                print("Response evaluations:")
-                for candidate, value in reply_scored:
-                    print(f"  {candidate}: {value:.3f}")
+                if args.debug:
+                    print("Response evaluations:")
+                    for candidate, value in reply_scored:
+                        print(f"  {candidate}: {value:.3f}")
         else:
             print("0000")
             return
